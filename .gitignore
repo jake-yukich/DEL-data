@@ -11,3 +11,4 @@ airflow.cfg
 airflow.db
 .astro/
 .dockerignore
+astro.md

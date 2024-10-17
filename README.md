@@ -2,7 +2,7 @@
 ##
 
 TODO:
-- [ ] fix port conflicts (use Docker to run psql)
+- [x] fix port conflicts (use Docker to run psql)
 - [ ] import DEL dataset (~300M molecules)
 - [ ] molecular representations, e.g. fingerprints, graphs (RDKit)
 - [ ] feature engineering

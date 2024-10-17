@@ -1,20 +1,15 @@
-from airflow import DAG
-from airflow.decorators import task
-from airflow.providers.postgres.operators.postgres import PostgresOperator
+from airflow.decorators import dag, task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from pendulum import datetime
-import requests
 import pandas as pd
 import os
-from rdkit import Chem
-from rdkit.Chem import AllChem
 from kaggle.api.kaggle_api_extended import KaggleApi
 
 @dag(
-    start_date=datetime(2024, 1, 1),
+    start_date=datetime(2024, 10, 16),
     schedule="@daily",
     catchup=False,
-    default_args={"owner": "Astro", "retries": 3},
+    default_args={"owner": "Astro", "retries": 1},
     tags=["belka", "import"],
 )
 def belka_import():
@@ -27,80 +22,59 @@ def belka_import():
         """
         Download the BELKA dataset from Kaggle.
         """
-        # Set up Kaggle API client
-        api = KaggleApi()
-        api.authenticate()
+        # api = KaggleApi()
+        # api.authenticate()
+        download_path = '/Users/jake/projects/kaggle-BELKA/leash-BELKA'
 
-        # Set the path where the dataset will be downloaded
-        download_path = '/Users/jake/...'
+        file_names = ['train.parquet', 'test.parquet']
+    
+        # for file_name in file_names:
+        #     api.competition_download_file('leash-BELKA', file_name, path=download_path)
 
-        # Download the dataset
-        api.competition_download_file('leash-BELKA', 'train.parquet')
-        api.competition_download_file('leash-BELKA', 'test.parquet')
+        expected_files = [os.path.join(download_path, file_name) for file_name in file_names]
 
-        # Check if the download was successful
-        expected_file = os.path.join(download_path, "belka_data.csv")
-        if not os.path.exists(expected_file):
-            raise FileNotFoundError(f"Expected file {expected_file} not found after download")
+        for file in expected_files:
+            if not os.path.exists(file):
+                raise FileNotFoundError(f"Expected file {file} not found after download")
 
-        print(f"BELKA dataset successfully downloaded to {download_path}")
-        return expected_file
-
-    @task
-    def preprocess_and_fingerprint_data():
-        """
-        Preprocess and fingerprint the data.
-        """
-        # Load the data
-        df = pd.read_csv("/path/to/belka_data.csv")
-        
-        # Preprocess the data (example operations)
-        df = df.dropna()  # Remove rows with missing values
-        
-        # Generate molecular fingerprints
-        def generate_fingerprint(smiles):
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is not None:
-                return AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024).ToBitString()
-            return None
-
-        # Assuming 'SMILES' is the column with SMILES strings
-        df['Fingerprint'] = df['SMILES'].apply(generate_fingerprint)
-        
-        # Remove rows where fingerprint generation failed
-        df = df.dropna(subset=['Fingerprint'])
-        
-        # Save the processed data
-        df.to_csv("/path/to/processed_belka_data.csv", index=False)
+        print(f"BELKA datasets successfully downloaded to {download_path}")
+        return expected_files
 
     @task
-    def load_data_to_db():
+    def load_data_to_db(file_paths: list):
         """
         Load the processed data into the database.
         """
-        postgres_hook = PostgresHook(postgres_conn_id="belka_postgres")
-        df = pd.read_csv("/path/to/processed_belka_data.csv")
-        df.to_sql("belka_molecules", postgres_hook.get_sqlalchemy_engine(), if_exists="replace", index=False)
+        postgres_hook = PostgresHook(postgres_conn_id="belka_db")
+        engine = postgres_hook.get_sqlalchemy_engine()
+
+        for path in file_paths:
+            df = pd.read_parquet(path)
+            table_name = 'belka_' + os.path.basename(path).split('.')[0]
+            df.to_sql(table_name, engine, if_exists="replace", index=False)
+            print(f"Loaded {len(df)} rows into the database")
 
     @task
     def validate_data():
         """
         Validate the data in the database.
         """
-        postgres_hook = PostgresHook(postgres_conn_id="belka_postgres")
-        row_count = postgres_hook.get_first("SELECT COUNT(*) FROM belka_molecules")[0]
-        assert row_count > 0, "No data loaded into the database"
+        postgres_hook = PostgresHook(postgres_conn_id="belka_db")
+    
+        tables = ['belka_train', 'belka_test']
         
-        # Additional validation for fingerprints
-        fingerprint_count = postgres_hook.get_first("SELECT COUNT(*) FROM belka_molecules WHERE Fingerprint IS NOT NULL")[0]
-        assert fingerprint_count == row_count, "Some molecules are missing fingerprints"
+        for table in tables:
+            row_count = postgres_hook.get_first(f"SELECT COUNT(*) FROM {table}")[0]
+            print(f"Table {table} has {row_count} rows")
+            assert row_count > 0, f"No data loaded into the {table} table"
 
-    # Define task dependencies
+        print("Data validation completed")
+
+    # dependencies
     download_task = download_belka_data()
-    preprocess_task = preprocess_and_fingerprint_data()
-    load_task = load_data_to_db()
+    load_task = load_data_to_db(download_task)
     validate_task = validate_data()
 
-    download_task >> preprocess_task >> load_task >> validate_task
+    download_task >> load_task >> validate_task
 
 belka_import()

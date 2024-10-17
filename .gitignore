@@ -12,3 +12,5 @@ airflow.db
 .astro/
 .dockerignore
 astro.md
+data/
+docker-compose.override.yml

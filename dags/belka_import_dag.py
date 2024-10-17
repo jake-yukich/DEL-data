@@ -2,6 +2,13 @@ from airflow.decorators import dag, task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from pendulum import datetime
 import pandas as pd
+import dask.dataframe as dd
+from dask.distributed import Client
+from dask.diagnostics import ProgressBar
+from dask_sql import Context
+from airflow.exceptions import AirflowException
+from sqlalchemy.exc import SQLAlchemyError
+from datetime import timedelta
 import os
 from kaggle.api.kaggle_api_extended import KaggleApi
 
@@ -24,7 +31,7 @@ def belka_import():
         """
         # api = KaggleApi()
         # api.authenticate()
-        download_path = '/Users/jake/projects/kaggle-BELKA/leash-BELKA'
+        download_path = '/usr/local/airflow/data'
 
         file_names = ['train.parquet', 'test.parquet']
     
@@ -40,19 +47,43 @@ def belka_import():
         print(f"BELKA datasets successfully downloaded to {download_path}")
         return expected_files
 
-    @task
+    
+    @task(execution_timeout=timedelta(hours=1))
     def load_data_to_db(file_paths: list):
         """
-        Load the processed data into the database.
+        Load the processed data into the database using Dask.
         """
         postgres_hook = PostgresHook(postgres_conn_id="belka_db")
-        engine = postgres_hook.get_sqlalchemy_engine()
+        
+        try:
+            # with Client() as client:
+            #     print(f"Dask dashboard available at: {client.dashboard_link}")
+                
+            for path in file_paths:
+                print(f"Processing file: {path}")
+                
+                ddf = dd.read_parquet(path)
+                print(f"Loaded Dask DataFrame with {len(ddf.divisions)-1} partitions")
+                
+                table_name = 'belka_' + os.path.basename(path).split('.')[0]
+                
+                c = Context()
+                c.create_table(table_name, ddf)
+                
+                conn = postgres_hook.get_connection(postgres_hook.conn_name_attr)
+                db_url = f"postgresql://{conn.login}:{conn.password}@{conn.host}:{conn.port}/{conn.schema}"
+                
+                with ProgressBar():
+                    ddf.to_sql(table_name, db_url, if_exists="replace", index=False)
+                
+                print(f"Finished loading data into the database for {table_name}")
 
-        for path in file_paths:
-            df = pd.read_parquet(path)
-            table_name = 'belka_' + os.path.basename(path).split('.')[0]
-            df.to_sql(table_name, engine, if_exists="replace", index=False)
-            print(f"Loaded {len(df)} rows into the database")
+        except SQLAlchemyError as e:
+            print(f"Database error: {str(e)}")
+            raise AirflowException(f"Database error: {str(e)}")
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            raise AirflowException(f"Error: {str(e)}")
 
     @task
     def validate_data():
